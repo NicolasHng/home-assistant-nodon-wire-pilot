@@ -56,7 +56,7 @@ SELECT_OPTION = "option"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
-        vol.Required(CONF_HEATER): cv.entity_id,
+        vol.Required(CONF_HEATER): cv.entity_ids,
         vol.Optional(CONF_SENSOR): cv.entity_id,
         vol.Optional(CONF_ADDITIONAL_MODES, default=False): cv.boolean,
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
@@ -74,14 +74,14 @@ async def async_setup_platform(
     """Set up the wire pilot climate platform."""
     unique_id = config.get(CONF_UNIQUE_ID)
     name = config.get(CONF_NAME)
-    heater_entity_id = config.get(CONF_HEATER)
+    heater_entity_ids = config.get(CONF_HEATER)
     sensor_entity_id = config.get(CONF_SENSOR)
     additional_modes = config.get(CONF_ADDITIONAL_MODES)
 
     async_add_entities(
         [
             NodonPilotClimate(
-                unique_id, name, heater_entity_id, sensor_entity_id, additional_modes
+                unique_id, name, heater_entity_ids, sensor_entity_id, additional_modes
             )
         ]
     )
@@ -91,17 +91,20 @@ class NodonPilotClimate(ClimateEntity, RestoreEntity):
     """Representation of a Nodon Wire Pilot device."""
 
     def __init__(
-        self, unique_id, name, heater_entity_id, sensor_entity_id, additional_modes
+        self, unique_id, name, heater_entity_ids, sensor_entity_id, additional_modes
     ) -> None:
         """Initialize the climate device."""
-
-        self.heater_entity_id = heater_entity_id
+        if isinstance(heater_entity_ids, str):
+            self.heater_entity_ids = [ent_id.strip() for ent_id in heater_entity_ids.split(",")]
+        else:
+            self.heater_entity_ids = heater_entity_ids
         self.sensor_entity_id = sensor_entity_id
         self.additional_modes = additional_modes
+        self._cur_modes = None
         self._cur_temperature = None
 
         self._attr_unique_id = (
-            unique_id if unique_id else "nodon_wire_pilot_" + heater_entity_id
+            unique_id if unique_id else "nodon_wire_pilot_" + heater_entity_ids[0]
         )
         self._attr_name = name
 
@@ -110,10 +113,11 @@ class NodonPilotClimate(ClimateEntity, RestoreEntity):
         await super().async_added_to_hass()
 
         # Add listener
-        async_track_state_change(
-            self.hass, self.heater_entity_id, self._async_heater_changed
-        )
-        if self.sensor_entity_id is not None:
+        for heater_entity_id in self.heater_entity_ids[::-1]:
+            async_track_state_change(
+                self.hass, heater_entity_id, self._async_heater_changed
+            )
+        if self.sensor_entity_id is not None and False:  # To uncomment
             async_track_state_change(
                 self.hass, self.sensor_entity_id, self._async_temperature_changed
             )
@@ -151,13 +155,15 @@ class NodonPilotClimate(ClimateEntity, RestoreEntity):
 
     @property
     def heater_value(self) -> int | None:
-        """Return entity brightness."""
-        state = self.hass.states.get(self.heater_entity_id)
+        """Return entity mode."""
+        if len(self.heater_entity_ids) == 1:
+            state = self.hass.states.get(self.heater_entity_ids[0])
 
-        if state is None:
-            return
+            if state is None:
+                return
 
-        return state.attributes.get(ATTR_MODE)
+            return state.attributes.get(ATTR_MODE)
+        return self._cur_modes
 
     # Presets
     @property
@@ -242,9 +248,11 @@ class NodonPilotClimate(ClimateEntity, RestoreEntity):
             return HVACMode.HEAT
 
     @callback
-    def _async_heater_changed(self, entity_id, old_state, new_state) -> None:
+    async def _async_heater_changed(self, entity_id, old_state, new_state) -> None:
         if new_state is None:
             return
+        self._cur_modes = new_state.state
+        await self._async_set_heater_value(new_state.state)
         self.async_schedule_update_ha_state()
 
     async def _async_temperature_changed(self, entity_id, old_state, new_state) -> None:
@@ -265,9 +273,10 @@ class NodonPilotClimate(ClimateEntity, RestoreEntity):
 
     async def _async_set_heater_value(self, value):
         """Turn heater toggleable device on."""
-        data = {
-            ATTR_ENTITY_ID: self.heater_entity_id,
-            SELECT_OPTION: value,
-        }
+        for heater_entity_id in self.heater_entity_ids:
+            data = {
+                ATTR_ENTITY_ID: heater_entity_id,
+                SELECT_OPTION: value,
+            }
 
-        await self.hass.services.async_call(SELECT_DOMAIN, SERVICE_SELECT_OPTION, data)
+            await self.hass.services.async_call(SELECT_DOMAIN, SERVICE_SELECT_OPTION, data)
